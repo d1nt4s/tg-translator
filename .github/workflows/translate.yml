@@ -1,0 +1,43 @@
+name: translate
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"   # every 30 minutes (GitHub may start it a few minutes late)
+  workflow_dispatch:          # "Run workflow" button for manual runs
+
+permissions:
+  contents: write             # to commit the encrypted state.enc back
+# Only schedule/manual triggers: workflows from forks and pull requests never
+# get access to the secrets. Do not add pull_request_target here.
+
+concurrency:
+  group: translate
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: python bot.py
+        env:
+          TG_API_ID: ${{ secrets.TG_API_ID }}
+          TG_API_HASH: ${{ secrets.TG_API_HASH }}
+          TG_SESSION: ${{ secrets.TG_SESSION }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          TG_CHANNELS: ${{ secrets.TG_CHANNELS }}
+          TG_TARGET: ${{ secrets.TG_TARGET }}
+          STATE_KEY: ${{ secrets.STATE_KEY }}
+      - name: Save progress
+        if: always()
+        run: |
+          git config user.name "translator-bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add state.enc
+          git diff --cached --quiet || (git commit -m "state: update [skip ci]" && git push)

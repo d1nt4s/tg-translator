@@ -1,0 +1,11 @@
+# Public settings only. The list of channels and the target chat are private:
+# they live in GitHub Secrets TG_CHANNELS and TG_TARGET, never in this file.
+
+level: B2                 # your English level, affects word choice for the vocabulary list
+vocab_words: 5            # words/phrases listed under each post (0 = off)
+show_original: true       # Russian original in a collapsed quote under the translation
+
+max_posts_per_run: 15     # safety cap per run; the rest is picked up next run
+initial_posts: 3          # how many latest posts to take when a channel is added
+model: gemini-flash-latest  # any Gemini model; flash models are on the free tier
+seconds_between_requests: 6 # keeps us under the free-tier per-minute limit
