@@ -57,7 +57,8 @@ def load_config(path=CONFIG_PATH, env=os.environ):
     cfg.setdefault("show_original", True)
     cfg.setdefault("max_posts_per_run", 15)
     cfg.setdefault("initial_posts", 3)
-    cfg["model"] = cfg.get("model") or "gemini-flash-latest"
+    models = cfg.get("models") or [cfg.get("model") or "gemini-flash-latest"]
+    cfg["models"] = [models] if isinstance(models, str) else list(models)
     cfg.setdefault("seconds_between_requests", 6)
     cfg.setdefault("max_run_seconds", 600)  # stop taking new posts after this; job limit is 15 min
     cfg["channels"] = [str(c).strip().lstrip("@") for c in cfg["channels"] if str(c).strip()]
@@ -126,12 +127,17 @@ RESPONSE_SCHEMA = {
 }
 
 
+class Unavailable(Exception):
+    """Gemini is overloaded or not answering: stop the run without marking
+    posts as done, they are retried on the next run."""
+
+
 class ProviderError(Exception):
     """Key, model or account problem: no post can be translated, so stop the run
     without marking posts as done (they are retried on the next run)."""
 
 
-def _request_gemini(text, cfg, api_key, session):
+def _request_gemini(text, cfg, api_key, session, model):
     body = {
         "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT.format(
             level=cfg["level"], vocab_words=cfg["vocab_words"])}]},
@@ -142,8 +148,8 @@ def _request_gemini(text, cfg, api_key, session):
             "responseSchema": RESPONSE_SCHEMA,
         },
     }
-    url = GEMINI_URL.format(model=cfg["model"])
-    r = session.post(url, json=body, headers={"x-goog-api-key": api_key}, timeout=90)
+    url = GEMINI_URL.format(model=model)
+    r = session.post(url, json=body, headers={"x-goog-api-key": api_key}, timeout=60)
     extract = lambda d: "".join(p.get("text", "") for p in d["candidates"][0]["content"]["parts"])
     return r, extract
 
@@ -162,39 +168,47 @@ def parse_result(raw):
 
 
 def translate(text, cfg, api_key, session=requests):
-    request = _request_gemini
-    last_error = None
-    for attempt in range(4):
+    """Try the configured models in turn: when one is overloaded (503) or times
+    out, the next one is used right away."""
+    models = cfg["models"]
+    last_error, unavailable = None, 0
+    for attempt in range(max(4, 2 * len(models))):
+        model = models[attempt % len(models)]
         try:
-            r, extract = request(text, cfg, api_key, session)
+            r, extract = _request_gemini(text, cfg, api_key, session, model)
         except requests.RequestException as e:
-            last_error = type(e).__name__
-            print(f"  network error ({last_error}), retrying")
-            time.sleep(5 * (attempt + 1))
+            unavailable += 1
+            print(f"  {model}: network error ({type(e).__name__}), trying again")
+            time.sleep(3)
             continue
         if r.status_code == 429:
-            # Per-minute limit: wait and retry. Daily limit: give up until next run.
-            if "PerDay" in r.text or "per day" in r.text.lower() or attempt == 3:
+            # Daily limit: give up until next run. Per-minute limit: wait and retry.
+            if "PerDay" in r.text or "per day" in r.text.lower():
                 raise RateLimited(r.text[:300])
             m = re.search(r'"retryDelay":\s*"(\d+)', r.text)
-            wait = min(int(m.group(1)) + 1, 65) if m else 20 * (attempt + 1)
-            print(f"  429 rate limit, waiting {wait}s")
+            wait = min(int(m.group(1)) + 1, 65) if m else 20
+            print(f"  {model}: 429 rate limit, waiting {wait}s")
             time.sleep(wait)
+            unavailable += 1
             continue
         if r.status_code >= 500:
-            last_error = f"HTTP {r.status_code}: {r.text[:300]}"
-            print(f"  HTTP {r.status_code} from Gemini, retrying")
-            time.sleep(10 * (attempt + 1))
+            unavailable += 1
+            print(f"  {model}: HTTP {r.status_code} (overloaded), trying again")
+            time.sleep(3)
             continue
-        if r.status_code in (401, 402, 403, 404):
+        if r.status_code in (401, 402, 403):
             raise ProviderError(f"HTTP {r.status_code}: {r.text[:400]}")
-        if r.status_code != 200:
-            raise TranslationFailed(f"HTTP {r.status_code}: {r.text[:400]}")
+        if r.status_code != 200:  # 400/404: bad model name or request
+            raise ProviderError(f"{model}: HTTP {r.status_code}: {r.text[:400]}")
         try:
-            return parse_result(extract(r.json()))
+            result = parse_result(extract(r.json()))
+            result["model"] = model
+            return result
         except (KeyError, IndexError, TypeError, ValueError) as e:
             last_error = f"bad response ({type(e).__name__}: {e})"[:300]
             continue
+    if unavailable and last_error is None:
+        raise Unavailable("all models overloaded or not answering")
     raise TranslationFailed(last_error or "unknown error")
 
 
@@ -343,7 +357,7 @@ async def process_channel(client, ref, cfg, state, target, api_key, budget, dial
                 t0 = time.monotonic()
                 # In a thread: a blocking HTTP call must not freeze the Telegram connection.
                 result = await asyncio.to_thread(translate, original, cfg, api_key)
-                print(f"  translated {len(original)} chars in {time.monotonic() - t0:.0f}s")
+                print(f"  translated {len(original)} chars in {time.monotonic() - t0:.0f}s ({result.get('model', '?')})")
                 text = build_post(title, link, result["translation"], result["vocabulary"],
                                   original, cfg["show_original"])
             except TranslationFailed as e:
@@ -396,6 +410,9 @@ async def main():
                 break
             except ProviderError as e:
                 print(f"Gemini error, nothing marked as done: {e}")
+                break
+            except Unavailable:
+                print("Gemini is overloaded right now, nothing marked as done; retrying next run")
                 break
             except Exception as e:
                 # Only the error type: messages can contain channel names.

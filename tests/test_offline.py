@@ -45,7 +45,7 @@ def no_waits(monkeypatch):
 
 
 CFG = bot.load_config(Path(__file__).resolve().parents[1] / "config.yaml")
-GEMINI_CFG = {**CFG, "provider": "gemini", "model": "gemini-flash-latest"}
+GEMINI_CFG = CFG
 
 
 
@@ -195,3 +195,22 @@ def test_key_error_stops_run_without_skipping_posts(monkeypatch, tmp_path):
     except bot.ProviderError:
         pass
     assert state["example_news"] == 0 and client.sent == []
+
+
+def test_overloaded_model_falls_back_to_next(monkeypatch):
+    monkeypatch.setattr(bot.time, "sleep", lambda s: None)
+    s = FakeSession([FakeResponse(503, {"error": "high demand"}),
+                     gemini_ok({"translation": "Hi", "vocabulary": []})])
+    out = bot.translate("Привет", CFG, "key", session=s)
+    assert "gemini-flash-latest:" in s.calls[0][0] and "gemini-flash-lite-latest:" in s.calls[1][0]
+    assert out["model"] == "gemini-flash-lite-latest"
+
+
+def test_all_overloaded_raises_unavailable(monkeypatch):
+    monkeypatch.setattr(bot.time, "sleep", lambda s: None)
+    s = FakeSession([FakeResponse(503, {"error": "high demand"})] * 4)
+    try:
+        bot.translate("x", CFG, "key", session=s)
+        raise AssertionError("expected Unavailable")
+    except bot.Unavailable:
+        pass
