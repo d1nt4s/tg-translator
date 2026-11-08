@@ -57,7 +57,12 @@ def load_config(path=CONFIG_PATH, env=os.environ):
     cfg.setdefault("show_original", True)
     cfg.setdefault("max_posts_per_run", 15)
     cfg.setdefault("initial_posts", 3)
-    cfg.setdefault("model", "gemini-flash-latest")
+    cfg.setdefault("provider", "mistral")
+    preset = PROVIDERS.get(cfg["provider"], {})
+    cfg.setdefault("base_url", preset.get("base_url"))
+    cfg["model"] = cfg.get("model") or preset.get("model")
+    if cfg["provider"] != "gemini" and not cfg["base_url"]:
+        raise ValueError(f"Unknown provider '{cfg['provider']}': set base_url in config.yaml")
     cfg.setdefault("seconds_between_requests", 6)
     cfg["channels"] = [str(c).strip().lstrip("@") for c in cfg["channels"] if str(c).strip()]
     return cfg
@@ -125,7 +130,21 @@ RESPONSE_SCHEMA = {
 }
 
 
-def translate(text, cfg, api_key, session=requests):
+# OpenAI-compatible providers with a free tier. Any other one works via base_url.
+PROVIDERS = {
+    "mistral": {"base_url": "https://api.mistral.ai/v1", "model": "mistral-medium-latest"},
+    "groq": {"base_url": "https://api.groq.com/openai/v1", "model": "llama-3.3-70b-versatile"},
+    "openrouter": {"base_url": "https://openrouter.ai/api/v1", "model": "deepseek/deepseek-chat:free"},
+    "gemini": {"base_url": None, "model": "gemini-flash-latest"},
+}
+
+
+class ProviderError(Exception):
+    """Key, model or account problem: no post can be translated, so stop the run
+    without marking posts as done (they are retried on the next run)."""
+
+
+def _request_gemini(text, cfg, api_key, session):
     body = {
         "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT.format(
             level=cfg["level"], vocab_words=cfg["vocab_words"])}]},
@@ -137,17 +156,54 @@ def translate(text, cfg, api_key, session=requests):
         },
     }
     url = GEMINI_URL.format(model=cfg["model"])
+    r = session.post(url, json=body, headers={"x-goog-api-key": api_key}, timeout=120)
+    extract = lambda d: "".join(p.get("text", "") for p in d["candidates"][0]["content"]["parts"])
+    return r, extract
+
+
+def _request_openai(text, cfg, api_key, session):
+    body = {
+        "model": cfg["model"],
+        "temperature": 0.3,
+        "response_format": {"type": "json_object"},
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT.format(
+                level=cfg["level"], vocab_words=cfg["vocab_words"])},
+            {"role": "user", "content": text},
+        ],
+    }
+    url = cfg["base_url"].rstrip("/") + "/chat/completions"
+    r = session.post(url, json=body, headers={"Authorization": f"Bearer {api_key}"}, timeout=120)
+    extract = lambda d: d["choices"][0]["message"]["content"]
+    return r, extract
+
+
+def parse_result(raw):
+    raw = raw.strip()
+    if not raw.startswith("{"):  # some models wrap JSON in ```json fences or prose
+        m = re.search(r"\{.*\}", raw, re.S)
+        raw = m.group(0) if m else raw
+    result = json.loads(raw)
+    if not str(result.get("translation", "")).strip():
+        raise ValueError("empty translation")
+    vocab = result.get("vocabulary") or []
+    result["vocabulary"] = [v for v in vocab if isinstance(v, dict)]
+    return result
+
+
+def translate(text, cfg, api_key, session=requests):
+    request = _request_gemini if cfg["provider"] == "gemini" else _request_openai
     last_error = None
     for attempt in range(4):
         try:
-            r = session.post(url, json=body, headers={"x-goog-api-key": api_key}, timeout=120)
+            r, extract = request(text, cfg, api_key, session)
         except requests.RequestException as e:
-            last_error = str(e)
+            last_error = type(e).__name__
             time.sleep(5 * (attempt + 1))
             continue
         if r.status_code == 429:
             # Per-minute limit: wait and retry. Daily limit: give up until next run.
-            if "PerDay" in r.text or attempt == 3:
+            if "PerDay" in r.text or "per day" in r.text.lower() or attempt == 3:
                 raise RateLimited(r.text[:300])
             time.sleep(30 * (attempt + 1))
             continue
@@ -155,18 +211,14 @@ def translate(text, cfg, api_key, session=requests):
             last_error = f"HTTP {r.status_code}: {r.text[:300]}"
             time.sleep(10 * (attempt + 1))
             continue
+        if r.status_code in (401, 402, 403, 404):
+            raise ProviderError(f"HTTP {r.status_code}: {r.text[:400]}")
         if r.status_code != 200:
-            raise TranslationFailed(f"HTTP {r.status_code}: {r.text[:500]}")
+            raise TranslationFailed(f"HTTP {r.status_code}: {r.text[:400]}")
         try:
-            data = r.json()
-            raw = "".join(p.get("text", "") for p in data["candidates"][0]["content"]["parts"])
-            result = json.loads(raw)
-            if not result.get("translation", "").strip():
-                raise ValueError("empty translation")
-            result.setdefault("vocabulary", [])
-            return result
-        except (KeyError, IndexError, ValueError) as e:
-            last_error = f"bad response ({e}): {r.text[:300]}"
+            return parse_result(extract(r.json()))
+        except (KeyError, IndexError, TypeError, ValueError) as e:
+            last_error = f"bad response ({type(e).__name__}: {e})"[:300]
             continue
     raise TranslationFailed(last_error or "unknown error")
 
@@ -334,7 +386,7 @@ async def main():
     api_id = int(os.environ["TG_API_ID"])
     api_hash = os.environ["TG_API_HASH"]
     session = os.environ["TG_SESSION"]
-    api_key = os.environ["GEMINI_API_KEY"]
+    api_key = os.environ.get("LLM_API_KEY") or os.environ["GEMINI_API_KEY"]
 
     _fernet()  # fail early if STATE_KEY is missing
     if not cfg["channels"]:
@@ -356,7 +408,10 @@ async def main():
                 budget -= await process_channel(client, ref, cfg, state, target, api_key,
                                                 budget, dialogs_cache, label)
             except RateLimited:
-                print("Gemini quota exhausted, will continue next run")
+                print("LLM quota exhausted, will continue next run")
+                break
+            except ProviderError as e:
+                print(f"LLM provider error, nothing marked as done: {e}")
                 break
             except Exception as e:
                 # Only the error type: messages can contain channel names.

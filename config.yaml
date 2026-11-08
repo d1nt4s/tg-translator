@@ -7,5 +7,9 @@ show_original: true       # Russian original in a collapsed quote under the tran
 
 max_posts_per_run: 15     # safety cap per run; the rest is picked up next run
 initial_posts: 3          # how many latest posts to take when a channel is added
-model: gemini-flash-latest  # any Gemini model; flash models are on the free tier
+# Translation provider: mistral (default), groq, openrouter or gemini.
+# The API key goes into the LLM_API_KEY secret.
+provider: mistral
+model:                    # empty = provider default (mistral-medium-latest for mistral)
+# base_url:               # for any other OpenAI-compatible provider
 seconds_between_requests: 6 # keeps us under the free-tier per-minute limit

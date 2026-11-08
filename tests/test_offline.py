@@ -35,12 +35,17 @@ def gemini_ok(result):
 
 
 CFG = bot.load_config(Path(__file__).resolve().parents[1] / "config.yaml")
+GEMINI_CFG = {**CFG, "provider": "gemini", "model": "gemini-flash-latest"}
+
+
+def openai_ok(result):
+    return FakeResponse(200, {"choices": [{"message": {"content": json.dumps(result)}}]})
 
 
 def test_translate_parses_json(monkeypatch):
     monkeypatch.setattr(bot.time, "sleep", lambda s: None)
     s = FakeSession([FakeResponse(503, {}), gemini_ok({"translation": "<b>Hi</b>", "vocabulary": []})])
-    out = bot.translate("<b>Привет</b>", CFG, "key", session=s)
+    out = bot.translate("<b>Привет</b>", GEMINI_CFG, "key", session=s)
     assert out["translation"] == "<b>Hi</b>"
     assert "gemini-flash-latest:generateContent" in s.calls[0][0]
 
@@ -49,7 +54,7 @@ def test_daily_quota_raises_rate_limited(monkeypatch):
     monkeypatch.setattr(bot.time, "sleep", lambda s: None)
     s = FakeSession([FakeResponse(429, {"error": "GenerateRequestsPerDayPerProjectPerModel"})])
     try:
-        bot.translate("x", CFG, "key", session=s)
+        bot.translate("x", GEMINI_CFG, "key", session=s)
     except bot.RateLimited:
         return
     raise AssertionError("expected RateLimited")
@@ -156,3 +161,40 @@ def test_state_is_encrypted(monkeypatch, tmp_path):
     assert bot.load_state(path) == {"example_news": 123456}
     monkeypatch.setenv("STATE_KEY", "wrong")
     assert bot.load_state(path) == {}
+
+
+def test_mistral_is_default_and_parses(monkeypatch):
+    assert CFG["provider"] == "mistral" and CFG["model"] == "mistral-medium-latest"
+    s = FakeSession([openai_ok({"translation": "Hi", "vocabulary": [{"en": "a", "ru": "б"}]})])
+    out = bot.translate("Привет", CFG, "key", session=s)
+    url, body = s.calls[0]
+    assert url == "https://api.mistral.ai/v1/chat/completions"
+    assert body["model"] == "mistral-medium-latest" and body["response_format"]["type"] == "json_object"
+    assert out["translation"] == "Hi" and out["vocabulary"] == [{"en": "a", "ru": "б"}]
+
+
+def test_json_in_code_fence_is_parsed():
+    raw = 'Sure!\n```json\n{"translation": "Hi", "vocabulary": []}\n```'
+    assert bot.parse_result(raw)["translation"] == "Hi"
+
+
+def test_key_error_stops_run_without_skipping_posts(monkeypatch, tmp_path):
+    monkeypatch.setenv("STATE_KEY", "k")
+    monkeypatch.setattr(bot, "STATE_PATH", tmp_path / "state.enc")
+    s = FakeSession([FakeResponse(403, {"error": "free tier is not available"})])
+    try:
+        bot.translate("x", CFG, "key", session=s)
+        raise AssertionError("expected ProviderError")
+    except bot.ProviderError:
+        pass
+
+    def boom(*a):
+        raise bot.ProviderError("403")
+    monkeypatch.setattr(bot, "translate", boom)
+    client = FakeClient([msg(1, "a"), msg(2, "b")])
+    state = {"example_news": 0}
+    try:
+        asyncio.run(bot.process_channel(client, "example_news", CFG, state, "me", "k", 15, []))
+    except bot.ProviderError:
+        pass
+    assert state["example_news"] == 0 and client.sent == []
