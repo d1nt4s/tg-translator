@@ -34,6 +34,16 @@ def gemini_ok(result):
     return FakeResponse(200, {"candidates": [{"content": {"parts": [{"text": json.dumps(result)}]}}]})
 
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def no_waits(monkeypatch):
+    async def fast_sleep(_):
+        return None
+    monkeypatch.setattr(bot.asyncio, "sleep", fast_sleep)
+
+
 CFG = bot.load_config(Path(__file__).resolve().parents[1] / "config.yaml")
 GEMINI_CFG = {**CFG, "provider": "gemini", "model": "gemini-flash-latest"}
 

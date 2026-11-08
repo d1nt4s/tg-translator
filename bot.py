@@ -59,6 +59,7 @@ def load_config(path=CONFIG_PATH, env=os.environ):
     cfg.setdefault("initial_posts", 3)
     cfg["model"] = cfg.get("model") or "gemini-flash-latest"
     cfg.setdefault("seconds_between_requests", 6)
+    cfg.setdefault("max_run_seconds", 600)  # stop taking new posts after this; job limit is 15 min
     cfg["channels"] = [str(c).strip().lstrip("@") for c in cfg["channels"] if str(c).strip()]
     return cfg
 
@@ -142,7 +143,7 @@ def _request_gemini(text, cfg, api_key, session):
         },
     }
     url = GEMINI_URL.format(model=cfg["model"])
-    r = session.post(url, json=body, headers={"x-goog-api-key": api_key}, timeout=120)
+    r = session.post(url, json=body, headers={"x-goog-api-key": api_key}, timeout=90)
     extract = lambda d: "".join(p.get("text", "") for p in d["candidates"][0]["content"]["parts"])
     return r, extract
 
@@ -168,16 +169,21 @@ def translate(text, cfg, api_key, session=requests):
             r, extract = request(text, cfg, api_key, session)
         except requests.RequestException as e:
             last_error = type(e).__name__
+            print(f"  network error ({last_error}), retrying")
             time.sleep(5 * (attempt + 1))
             continue
         if r.status_code == 429:
             # Per-minute limit: wait and retry. Daily limit: give up until next run.
             if "PerDay" in r.text or "per day" in r.text.lower() or attempt == 3:
                 raise RateLimited(r.text[:300])
-            time.sleep(30 * (attempt + 1))
+            m = re.search(r'"retryDelay":\s*"(\d+)', r.text)
+            wait = min(int(m.group(1)) + 1, 65) if m else 20 * (attempt + 1)
+            print(f"  429 rate limit, waiting {wait}s")
+            time.sleep(wait)
             continue
         if r.status_code >= 500:
             last_error = f"HTTP {r.status_code}: {r.text[:300]}"
+            print(f"  HTTP {r.status_code} from Gemini, retrying")
             time.sleep(10 * (attempt + 1))
             continue
         if r.status_code in (401, 402, 403, 404):
@@ -320,6 +326,9 @@ async def process_channel(client, ref, cfg, state, target, api_key, budget, dial
     for group in groups:
         if sent >= budget:
             break
+        if time.monotonic() > cfg.get("_deadline", float("inf")):
+            print("  run time limit reached, the rest goes next run")
+            break
         max_id = max(m.id for m in group)
         original = next((m.text for m in group if m.text), "") or ""
         photos = [m.photo for m in group if m.photo]
@@ -331,18 +340,23 @@ async def process_channel(client, ref, cfg, state, target, api_key, budget, dial
         link = message_link(entity, group[0].id)
         if original.strip():
             try:
-                result = translate(original, cfg, api_key)
+                t0 = time.monotonic()
+                # In a thread: a blocking HTTP call must not freeze the Telegram connection.
+                result = await asyncio.to_thread(translate, original, cfg, api_key)
+                print(f"  translated {len(original)} chars in {time.monotonic() - t0:.0f}s")
                 text = build_post(title, link, result["translation"], result["vocabulary"],
                                   original, cfg["show_original"])
             except TranslationFailed as e:
                 print(f"  translation failed: {str(e)[:200]}")
                 text = build_post(title, link, "⚠️ Could not translate this post.", [],
                                   original, cfg["show_original"])
-            time.sleep(cfg["seconds_between_requests"])
+            await asyncio.sleep(cfg["seconds_between_requests"])
         else:
             text = build_post(title, link, "", [], "", False)
 
+        t0 = time.monotonic()
         await send_post(client, target, text, photos)
+        print(f"  sent in {time.monotonic() - t0:.0f}s")
         state[ref] = max_id
         save_state(state)
         sent += 1
@@ -358,6 +372,7 @@ async def main():
     api_key = os.environ["GEMINI_API_KEY"]
 
     _fernet()  # fail early if STATE_KEY is missing
+    cfg["_deadline"] = time.monotonic() + cfg["max_run_seconds"]
     if not cfg["channels"]:
         sys.exit("No channels: set the TG_CHANNELS secret")
 
