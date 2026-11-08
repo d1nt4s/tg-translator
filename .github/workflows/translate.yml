@@ -2,7 +2,8 @@ name: translate
 
 on:
   schedule:
-    - cron: "*/30 * * * *"   # every 30 minutes (GitHub may start it a few minutes late)
+    # Every 30 min at :17 and :47. Not :00/:30: GitHub drops many runs at those peak minutes.
+    - cron: "17,47 * * * *"
   workflow_dispatch:          # "Run workflow" button for manual runs
 
 permissions:
