@@ -54,7 +54,7 @@ def test_translate_parses_json(monkeypatch):
     s = FakeSession([FakeResponse(503, {}), gemini_ok({"translation": "<b>Hi</b>", "vocabulary": []})])
     out = bot.translate("<b>Привет</b>", GEMINI_CFG, "key", session=s)
     assert out["translation"] == "<b>Hi</b>"
-    assert "gemini-flash-latest:generateContent" in s.calls[0][0]
+    assert "gemini-flash-lite-latest:generateContent" in s.calls[0][0]
 
 
 def test_daily_quota_raises_rate_limited(monkeypatch):
@@ -203,8 +203,8 @@ def test_overloaded_model_falls_back_to_next(monkeypatch):
     s = FakeSession([FakeResponse(503, {"error": "high demand"}),
                      gemini_ok({"translation": "Hi", "vocabulary": []})])
     out = bot.translate("Привет", CFG, "key", session=s)
-    assert "gemini-flash-latest:" in s.calls[0][0] and "gemini-flash-lite-latest:" in s.calls[1][0]
-    assert out["model"] == "gemini-flash-lite-latest"
+    assert "gemini-flash-lite-latest:" in s.calls[0][0] and "gemini-flash-latest:" in s.calls[1][0]
+    assert out["model"] == "gemini-flash-latest"
 
 
 def test_all_overloaded_raises_unavailable(monkeypatch):
@@ -223,6 +223,6 @@ def test_daily_quota_on_one_model_switches_to_other(monkeypatch):
     s = FakeSession([FakeResponse(429, {"error": "GenerateRequestsPerDayPerProjectPerModel"}),
                      gemini_ok({"translation": "Hi", "vocabulary": []}),
                      gemini_ok({"translation": "Hi2", "vocabulary": []})])
-    assert bot.translate("x", CFG, "key", session=s)["model"] == "gemini-flash-lite-latest"
-    assert bot.translate("y", CFG, "key", session=s)["model"] == "gemini-flash-lite-latest"
+    assert bot.translate("x", CFG, "key", session=s)["model"] == "gemini-flash-latest"
+    assert bot.translate("y", CFG, "key", session=s)["model"] == "gemini-flash-latest"
     assert len(s.calls) == 3  # exhausted model is not retried in the same run

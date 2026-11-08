@@ -8,7 +8,9 @@ show_original: true       # Russian original in a collapsed quote under the tran
 max_posts_per_run: 15     # safety cap per run; the rest is picked up next run
 initial_posts: 3          # how many latest posts to take when a channel is added
 # Gemini models, tried in order: if the first is overloaded or slow, the next is used.
+# flash-lite answers in seconds and has a large free quota; flash is a fallback
+# (on the free tier it is often overloaded and runs out of daily quota fast).
 models:
-  - gemini-flash-latest
   - gemini-flash-lite-latest
+  - gemini-flash-latest
 seconds_between_requests: 6 # keeps us under the free-tier per-minute limit

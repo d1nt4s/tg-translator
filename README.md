@@ -80,7 +80,7 @@ Original                         ← ссылка на исходный пост
 
 ## Повседневное использование
 - **Добавить или убрать канал:** Settings → Secrets → `TG_CHANNELS` → Update. В репозитории при этом ничего не меняется.
-- **Настройки** (`level`, `vocab_words`, `show_original`, `model`) лежат в `config.yaml`.
+- **Настройки** (`level`, `vocab_words`, `show_original`, `models`) лежат в `config.yaml`.
 - **Тесты:** `pip install -r requirements.txt pytest && python -m pytest tests`.
 
 ## Что важно знать
