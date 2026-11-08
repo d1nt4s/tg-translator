@@ -38,9 +38,6 @@ CFG = bot.load_config(Path(__file__).resolve().parents[1] / "config.yaml")
 GEMINI_CFG = {**CFG, "provider": "gemini", "model": "gemini-flash-latest"}
 
 
-def openai_ok(result):
-    return FakeResponse(200, {"choices": [{"message": {"content": json.dumps(result)}}]})
-
 
 def test_translate_parses_json(monkeypatch):
     monkeypatch.setattr(bot.time, "sleep", lambda s: None)
@@ -161,16 +158,6 @@ def test_state_is_encrypted(monkeypatch, tmp_path):
     assert bot.load_state(path) == {"example_news": 123456}
     monkeypatch.setenv("STATE_KEY", "wrong")
     assert bot.load_state(path) == {}
-
-
-def test_mistral_is_default_and_parses(monkeypatch):
-    assert CFG["provider"] == "mistral" and CFG["model"] == "mistral-medium-latest"
-    s = FakeSession([openai_ok({"translation": "Hi", "vocabulary": [{"en": "a", "ru": "б"}]})])
-    out = bot.translate("Привет", CFG, "key", session=s)
-    url, body = s.calls[0]
-    assert url == "https://api.mistral.ai/v1/chat/completions"
-    assert body["model"] == "mistral-medium-latest" and body["response_format"]["type"] == "json_object"
-    assert out["translation"] == "Hi" and out["vocabulary"] == [{"en": "a", "ru": "б"}]
 
 
 def test_json_in_code_fence_is_parsed():
