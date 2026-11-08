@@ -127,6 +127,9 @@ RESPONSE_SCHEMA = {
 }
 
 
+EXHAUSTED_TODAY = set()  # models whose daily free quota ran out during this run
+
+
 class Unavailable(Exception):
     """Gemini is overloaded or not answering: stop the run without marking
     posts as done, they are retried on the next run."""
@@ -170,9 +173,11 @@ def parse_result(raw):
 def translate(text, cfg, api_key, session=requests):
     """Try the configured models in turn: when one is overloaded (503) or times
     out, the next one is used right away."""
-    models = cfg["models"]
     last_error, unavailable = None, 0
-    for attempt in range(max(4, 2 * len(models))):
+    for attempt in range(max(4, 2 * len(cfg["models"]))):
+        models = [m for m in cfg["models"] if m not in EXHAUSTED_TODAY]
+        if not models:
+            raise RateLimited("daily quota used up on all models")
         model = models[attempt % len(models)]
         try:
             r, extract = _request_gemini(text, cfg, api_key, session, model)
@@ -184,7 +189,9 @@ def translate(text, cfg, api_key, session=requests):
         if r.status_code == 429:
             # Daily limit: give up until next run. Per-minute limit: wait and retry.
             if "PerDay" in r.text or "per day" in r.text.lower():
-                raise RateLimited(r.text[:300])
+                print(f"  {model}: daily quota used up, switching model")
+                EXHAUSTED_TODAY.add(model)
+                continue
             m = re.search(r'"retryDelay":\s*"(\d+)', r.text)
             wait = min(int(m.group(1)) + 1, 65) if m else 20
             print(f"  {model}: 429 rate limit, waiting {wait}s")

@@ -59,7 +59,8 @@ def test_translate_parses_json(monkeypatch):
 
 def test_daily_quota_raises_rate_limited(monkeypatch):
     monkeypatch.setattr(bot.time, "sleep", lambda s: None)
-    s = FakeSession([FakeResponse(429, {"error": "GenerateRequestsPerDayPerProjectPerModel"})])
+    monkeypatch.setattr(bot, "EXHAUSTED_TODAY", set())
+    s = FakeSession([FakeResponse(429, {"error": "GenerateRequestsPerDayPerProjectPerModel"})] * 2)
     try:
         bot.translate("x", GEMINI_CFG, "key", session=s)
     except bot.RateLimited:
@@ -214,3 +215,14 @@ def test_all_overloaded_raises_unavailable(monkeypatch):
         raise AssertionError("expected Unavailable")
     except bot.Unavailable:
         pass
+
+
+def test_daily_quota_on_one_model_switches_to_other(monkeypatch):
+    monkeypatch.setattr(bot.time, "sleep", lambda s: None)
+    monkeypatch.setattr(bot, "EXHAUSTED_TODAY", set())
+    s = FakeSession([FakeResponse(429, {"error": "GenerateRequestsPerDayPerProjectPerModel"}),
+                     gemini_ok({"translation": "Hi", "vocabulary": []}),
+                     gemini_ok({"translation": "Hi2", "vocabulary": []})])
+    assert bot.translate("x", CFG, "key", session=s)["model"] == "gemini-flash-lite-latest"
+    assert bot.translate("y", CFG, "key", session=s)["model"] == "gemini-flash-lite-latest"
+    assert len(s.calls) == 3  # exhausted model is not retried in the same run
